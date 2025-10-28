@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn==0.30.0
+
+# LangChain ecosystem (stable combo)
+langchain==0.3.8
+langchain-core==0.3.21
+langchain-community==0.3.7
+langchain-openai==0.2.5
+
+# Database + env
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+pydantic==2.9.2

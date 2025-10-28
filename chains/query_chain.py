@@ -1,0 +1,504 @@
+import os
+import re
+import json
+import datetime
+import decimal
+from typing import Dict, Any
+from langchain_openai import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
+from sqlalchemy import text
+from dotenv import load_dotenv
+
+from db.connection import fetch_sample_rows, execute_read_query, engine
+from chains.summarizer import summarize_for_minister
+
+load_dotenv()
+
+# Configuration
+MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
+SAMPLE_ROWS = int(os.getenv("SAMPLE_ROWS", "2"))
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+llm = ChatOpenAI(model=LLM_MODEL, temperature=0)
+
+
+# Utility: Safe JSON serialization
+def safe_serialize(obj):
+    """Safely convert non-JSON types (datetime, Decimal, etc.) into strings."""
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    return str(obj)
+
+
+# Schema Loader (tables.json)
+def build_schema_summary():
+    """
+    Load schema context strictly from tables.json.
+    This file defines all valid tables and columns.
+    If missing, fallback to live DB introspection.
+    """
+    tables_path = os.path.join(os.path.dirname(__file__), "..", "tables.json")
+
+    if os.path.exists(tables_path):
+        try:
+            with open(tables_path, "r", encoding="utf-8") as f:
+                schema_data = json.load(f)
+
+            tables = schema_data.get("tables", {})
+            summary = []
+
+            for table_name, meta in tables.items():
+                desc = meta.get("description", "")
+                cols = meta.get("columns", [])
+                col_desc = [
+                    f"{c['name']} ({c['type']}): {c.get('description', '')}" for c in cols
+                ]
+                samples = fetch_sample_rows(table_name, SAMPLE_ROWS)
+
+                safe_samples = [
+                    {k: safe_serialize(v) for k, v in r.items()} for r in samples[:SAMPLE_ROWS]
+                ]
+
+                summary.append({
+                    "table": table_name,
+                    "description": desc,
+                    "columns": col_desc,
+                    "sample_rows": safe_samples,
+                })
+
+            print(f"Loaded schema from tables.json ({len(summary)} tables)")
+            return summary
+        except Exception as e:
+            print(f"Failed to load tables.json, fallback to DB schema: {e}")
+
+    print("No tables.json found — using live DB schema instead")
+    return _build_schema_from_db()
+
+
+def _build_schema_from_db():
+    """Fallback: auto-discover schema directly from PostgreSQL."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
+        )
+        tables = [r[0] for r in result.fetchall()]
+
+    parts = []
+    with engine.connect() as conn:
+        for t in tables:
+            try:
+                col_query = text("""
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name=:table
+                """)
+                cols = conn.execute(col_query, {"table": t}).fetchall()
+                col_desc = [f"{c[0]} ({c[1]})" for c in cols]
+                samples = fetch_sample_rows(t, SAMPLE_ROWS)
+                safe_samples = [
+                    {k: safe_serialize(v) for k, v in r.items()} for r in samples[:SAMPLE_ROWS]
+                ]
+                parts.append({
+                    "table": t,
+                    "columns": col_desc,
+                    "sample_rows": safe_samples,
+                })
+            except Exception as e:
+                print(f"Failed to describe {t}: {e}")
+    return parts
+
+
+def build_llm_friendly_schema(schema_summary: list) -> str:
+    """
+    Build a cleaner, more LLM-friendly representation of the schema.
+    This format is easier for LLM to understand and follow.
+    """
+    schema_parts = []
+    
+    for table_info in schema_summary:
+        table_name = table_info["table"]
+        description = table_info.get("description", "")
+        columns = table_info.get("columns", [])
+        
+        # Build table section
+        table_section = f"TABEL: {table_name}"
+        if description:
+            table_section += f"\nDESKRIPSI: {description}"
+        
+        table_section += "\nKOLOM:"
+        for col in columns:
+            # Extract column name (before first space/parenthesis)
+            col_name = col.split(" ")[0].split("(")[0]
+            table_section += f"\n  - {col_name}"
+        
+        # Add sample data if available
+        samples = table_info.get("sample_rows", [])
+        if samples:
+            table_section += f"\nCONTOH DATA: {samples[0] if samples else '{}'}"
+        
+        table_section += "\n" + "-" * 50
+        schema_parts.append(table_section)
+    
+    return "\n\n".join(schema_parts)
+
+
+def get_example_queries() -> str:
+    """
+    Provide good examples of queries based on common tables.
+    This helps LLM learn the correct patterns.
+    """
+    examples = [
+        "Contoh query yang BENAR:",
+        "1. SELECT name FROM cooperatives LIMIT 10",
+        "2. SELECT COUNT(*) FROM cooperatives WHERE created_at > '2023-01-01'",
+        "3. SELECT province_id, COUNT(*) as total FROM cooperatives GROUP BY province_id",
+        "4. SELECT c.name, p.name as province FROM cooperatives c JOIN provinces p ON c.provinceId = p.province_id",
+        "5. SELECT name FROM users WHERE email LIKE '%@gmail.com'",
+        "",
+        "Contoh query yang SALAH:",
+        "❌ SELECT cooperative_name FROM koperasi (nama tabel/kolom tidak ada)",
+        "❌ SELECT * FROM coop (singkatan tidak boleh)",
+        "❌ SELECT name FROM cooperative (bentuk singular, harus 'cooperatives')",
+    ]
+    return "\n".join(examples)
+
+
+# SQL Generation (schema-aware)
+def ask_llm_for_sql(question: str) -> Dict[str, Any]:
+    """
+    Ask LLM to generate a SQL query strictly based on tables.json.
+    Must return valid JSON: { "sql": "<query>" }.
+    """
+    schema_summary = build_schema_summary()
+
+    # Build cleaner schema format for LLM
+    schema_text = build_llm_friendly_schema(schema_summary)
+    
+    # Build explicit list of valid identifiers
+    valid_tables = []
+    valid_columns = []
+    for table in schema_summary:
+        valid_tables.append(table["table"])
+        for col in table["columns"]:
+            col_name = col.split(" ")[0]
+            valid_columns.append(f"{table['table']}.{col_name}")
+    
+    system_msg = SystemMessage(
+        content=(
+            "Anda adalah asisten generator SQL PostgreSQL untuk dashboard data pemerintah. "
+            "SANGAT PENTING: Anda HANYA boleh menggunakan tabel dan kolom yang PERSIS seperti "
+            "yang ada dalam schema di bawah ini. "
+            "Jika pertanyaan tidak bisa dijawab dengan schema ini, kembalikan JSON "
+            '{\"sql\": \"SELECT \'Data tidak tersedia\'::text as message\"}. '
+            "JANGAN PERNAH mengarang, mengira-ngira, atau menebak nama kolom/tabel."
+        )
+    )
+
+    human_msg = HumanMessage(
+        content=f"""
+PERTANYAAN USER:
+{question}
+
+SCHEMA RESMI (dari tables.json):
+{schema_text}
+
+DAFTAR TABEL YANG VALID:
+{', '.join(valid_tables)}
+
+DAFTAR KOLOM YANG VALID (dengan nama tabel):
+{', '.join(valid_columns[:50])}... (dan lainnya sesuai schema di atas)
+
+{get_example_queries()}
+
+ATURAN WAJIB:
+1. HANYA gunakan nama tabel dan kolom yang ADA di schema di atas
+2. Nama tabel dan kolom CASE-SENSITIVE dan harus PERSIS sama
+3. Jika ragu, lebih baik kembalikan "Data tidak tersedia"
+4. Format output: JSON saja {{ "sql": "SELECT ..." }}
+5. Jangan tambahkan komentar atau penjelasan di luar JSON
+6. Pelajari contoh query yang benar di atas!
+"""
+    )
+
+    response = llm.invoke([system_msg, human_msg])
+    text = response.content.strip()
+
+    try:
+        obj = json.loads(text)
+        if "sql" in obj:
+            return {"sql": obj["sql"]}
+    except json.JSONDecodeError:
+        json_sub = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_sub:
+            try:
+                obj = json.loads(json_sub.group(0))
+                if "sql" in obj:
+                    return {"sql": obj["sql"]}
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError("Invalid JSON response from LLM:\n" + text)
+
+
+# Validation: Basic + Schema enforcement
+_SELECT_ONLY_RE = re.compile(r"^\s*SELECT\s", re.IGNORECASE)
+_FORBIDDEN_RE = re.compile(
+    r";|--|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bALTER\b|\bTRUNCATE\b|\bCREATE\b",
+    re.IGNORECASE,
+)
+
+
+def validate_sql(sql: str) -> bool:
+    """Ensure SQL is safe and read-only."""
+    if not _SELECT_ONLY_RE.search(sql):
+        return False
+    if _FORBIDDEN_RE.search(sql):
+        return False
+    return True
+
+
+def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str | None]:
+    """
+    Ensure that all table and column names used in the SQL exist in tables.json.
+    Returns (is_valid, offending_identifier)
+    """
+    # Build comprehensive list of valid identifiers
+    valid_tables = set()
+    valid_columns = set()
+    table_columns = {}  # table_name -> set of columns
+    
+    for table_info in schema_summary:
+        table_name = table_info["table"]
+        valid_tables.add(table_name.lower())
+        table_columns[table_name.lower()] = set()
+        
+        for col in table_info["columns"]:
+            col_name = col.split(" ")[0].split("(")[0]  # Extract clean column name
+            valid_columns.add(col_name.lower())
+            table_columns[table_name.lower()].add(col_name.lower())
+
+    # Reserved SQL keywords that should be ignored
+    sql_keywords = {
+        'select', 'from', 'where', 'join', 'on', 'as', 'and', 'or', 'not', 'in', 'is', 'null',
+        'count', 'sum', 'avg', 'max', 'min', 'distinct', 'group', 'by', 'order', 'having',
+        'left', 'right', 'inner', 'outer', 'union', 'all', 'exists', 'like', 'between',
+        'case', 'when', 'then', 'else', 'end', 'limit', 'offset', 'desc', 'asc',
+        'true', 'false', 'cast', 'extract', 'year', 'month', 'day', 'date', 'timestamp',
+        'varchar', 'text', 'integer', 'bigint', 'boolean', 'numeric', 'decimal'
+    }
+    
+    # Extract identifiers from SQL (more sophisticated parsing)
+    # Remove quoted strings first
+    sql_cleaned = re.sub(r"'[^']*'", '', sql)
+    sql_cleaned = re.sub(r'"[^"]*"', '', sql_cleaned)
+    
+    # Find potential table and column references
+    # Pattern: word that could be table/column (not a keyword, number, or function)
+    potential_identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', sql_cleaned)
+    
+    for identifier in potential_identifiers:
+        identifier_lower = identifier.lower()
+        
+        # Skip SQL keywords
+        if identifier_lower in sql_keywords:
+            continue
+            
+        # Skip common SQL functions
+        if identifier_lower in {'now', 'current_date', 'current_timestamp', 'coalesce', 'concat', 'upper', 'lower'}:
+            continue
+            
+        # Check if it's a valid table or column
+        is_valid_table = identifier_lower in valid_tables
+        is_valid_column = identifier_lower in valid_columns
+        
+        if not (is_valid_table or is_valid_column):
+            return False, identifier
+    
+    # Additional check: look for FROM clauses and JOIN clauses to verify table names
+    from_tables = re.findall(r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql, re.IGNORECASE)
+    join_tables = re.findall(r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql, re.IGNORECASE)
+    
+    for table in from_tables + join_tables:
+        if table.lower() not in valid_tables:
+            return False, f"table:{table}"
+    
+    return True, None
+
+
+def ask_llm_for_sql_with_retry(question: str, max_retries: int = 2) -> Dict[str, Any]:
+    """
+    Ask LLM for SQL with retry mechanism and specific error feedback.
+    """
+    schema_summary = build_schema_summary()
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt == 0:
+                # First attempt - normal prompt
+                result = ask_llm_for_sql(question)
+            else:
+                # Retry with error feedback
+                result = ask_llm_for_sql_with_feedback(question, last_error, schema_summary)
+            
+            sql = result["sql"].strip()
+            if sql.endswith(";"):
+                sql = sql[:-1]
+            
+            # Validate the SQL
+            if not validate_sql(sql):
+                last_error = "SQL harus dimulai dengan SELECT dan tidak boleh mengandung operasi modifikasi data"
+                continue
+                
+            ok, invalid_name = enforce_schema_strictly(sql, schema_summary)
+            if not ok:
+                last_error = f"Nama tabel/kolom '{invalid_name}' tidak ditemukan dalam schema. Gunakan hanya nama yang ada di tables.json"
+                continue
+                
+            # If we get here, SQL is valid
+            return {"sql": sql}
+            
+        except Exception as e:
+            last_error = f"Error dalam generate SQL: {str(e)}"
+            
+    # If all retries failed
+    return {"sql": "SELECT 'Gagal generate SQL yang valid'::text as error"}
+
+
+def ask_llm_for_sql_with_feedback(question: str, error_feedback: str, schema_summary: list) -> Dict[str, Any]:
+    """
+    Ask LLM for SQL with specific error feedback from previous attempt.
+    """
+    schema_text = build_llm_friendly_schema(schema_summary)
+    
+    # Build valid identifiers list
+    valid_tables = []
+    valid_columns = []
+    for table in schema_summary:
+        valid_tables.append(table["table"])
+        for col in table["columns"]:
+            col_name = col.split(" ")[0].split("(")[0]
+            valid_columns.append(f"{table['table']}.{col_name}")
+    
+    system_msg = SystemMessage(
+        content=(
+            "Anda adalah asisten generator SQL PostgreSQL yang HARUS memperbaiki kesalahan. "
+            "Percobaan sebelumnya GAGAL. Anda HARUS belajar dari error dan menggunakan "
+            "HANYA nama tabel dan kolom yang PERSIS ADA dalam schema."
+        )
+    )
+
+    human_msg = HumanMessage(
+        content=f"""
+PERTANYAAN USER:
+{question}
+
+ERROR DARI PERCOBAAN SEBELUMNYA:
+{error_feedback}
+
+SCHEMA LENGKAP:
+{schema_text}
+
+TABEL YANG TERSEDIA:
+{', '.join(valid_tables)}
+
+{get_example_queries()}
+
+PERBAIKI ERROR DI ATAS!
+- Jika nama tabel/kolom salah, ganti dengan yang ADA di schema
+- Jika tidak yakin, pilih tabel/kolom yang paling relevan
+- Pelajari contoh query yang benar di atas
+- Format: {{ "sql": "SELECT ..." }}
+"""
+    )
+
+    response = llm.invoke([system_msg, human_msg])
+    text = response.content.strip()
+
+    try:
+        obj = json.loads(text)
+        if "sql" in obj:
+            return {"sql": obj["sql"]}
+    except json.JSONDecodeError:
+        json_sub = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_sub:
+            try:
+                obj = json.loads(json_sub.group(0))
+                if "sql" in obj:
+                    return {"sql": obj["sql"]}
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError("Invalid JSON response from LLM on retry:\n" + text)
+
+
+# Main Query Pipeline
+def run_query_pipeline(question: str, user_id: int | None = None):
+    """
+    1. Generate SQL via LLM (schema-constrained) with retry mechanism
+    2. Validate SQL safety and schema compliance
+    3. Execute query on PostgreSQL
+    4. Summarize using actual data
+    """
+    # Use the new retry mechanism
+    llm_resp = ask_llm_for_sql_with_retry(question, max_retries=2)
+    raw_sql = llm_resp["sql"].strip()
+
+    if raw_sql.endswith(";"):
+        raw_sql = raw_sql[:-1]
+
+    # Check if this is an error response
+    if "Gagal generate SQL yang valid" in raw_sql or "Data tidak tersedia" in raw_sql:
+        return {
+            "error": "Tidak dapat membuat query yang valid untuk pertanyaan ini", 
+            "generated_sql": raw_sql,
+            "suggestion": "Coba perbaiki pertanyaan atau pastikan data yang dicari tersedia dalam sistem"
+        }
+
+    # Final validation (should pass since retry handled this)
+    schema_summary = build_schema_summary()
+    if not validate_sql(raw_sql):
+        return {"error": "Generated SQL failed final validation.", "generated_sql": raw_sql}
+
+    ok, invalid_name = enforce_schema_strictly(raw_sql, schema_summary)
+    if not ok:
+        return {
+            "error": f"Query uses invalid column or table: {invalid_name}",
+            "generated_sql": raw_sql,
+        }
+
+    # Add debug logging
+    print(f"[DEBUG] Generated SQL: {raw_sql}")
+    print(f"[DEBUG] Question: {question}")
+
+    try:
+        result = execute_read_query(raw_sql, params=None, max_rows=MAX_ROWS)
+        print(f"[DEBUG] Query executed successfully, got {len(result['rows'])} rows")
+    except Exception as e:
+        print(f"[ERROR] Query execution failed: {str(e)}")
+        return {
+            "error": "Query execution failed",
+            "details": str(e),
+            "generated_sql": raw_sql,
+        }
+
+    rows = result["rows"]
+    for row in rows:
+        for k, v in row.items():
+            row[k] = safe_serialize(v)
+
+    columns = list(result["columns"])
+    payload = {
+        "type": "table",
+        "columns": columns,
+        "rows": [list(r.values()) for r in rows],
+    }
+
+    summary = summarize_for_minister(question, rows[:5] if rows else [])
+    return {
+        "text": summary,
+        "payload": payload,
+        "meta": {"row_count": len(rows), "generated_sql": raw_sql},
+    }
