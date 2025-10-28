@@ -392,6 +392,7 @@ def validate_sql(sql: str) -> bool:
 def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str | None]:
     """
     Ensure that all table and column names used in the SQL exist in tables.json.
+    Now supports table aliases and more sophisticated SQL parsing.
     Returns (is_valid, offending_identifier)
     """
     # Build comprehensive list of valid identifiers
@@ -416,16 +417,17 @@ def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str |
         'left', 'right', 'inner', 'outer', 'union', 'all', 'exists', 'like', 'between',
         'case', 'when', 'then', 'else', 'end', 'limit', 'offset', 'desc', 'asc',
         'true', 'false', 'cast', 'extract', 'year', 'month', 'day', 'date', 'timestamp',
-        'varchar', 'text', 'integer', 'bigint', 'boolean', 'numeric', 'decimal'
+        'varchar', 'text', 'integer', 'bigint', 'boolean', 'numeric', 'decimal', 'with'
     }
     
-    # Extract identifiers from SQL (more sophisticated parsing)
+    # Extract table aliases from SQL
+    table_aliases = extract_table_aliases(sql, valid_tables)
+    
     # Remove quoted strings first
     sql_cleaned = re.sub(r"'[^']*'", '', sql)
     sql_cleaned = re.sub(r'"[^"]*"', '', sql_cleaned)
     
     # Find potential table and column references
-    # Pattern: word that could be table/column (not a keyword, number, or function)
     potential_identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', sql_cleaned)
     
     for identifier in potential_identifiers:
@@ -438,6 +440,10 @@ def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str |
         # Skip common SQL functions
         if identifier_lower in {'now', 'current_date', 'current_timestamp', 'coalesce', 'concat', 'upper', 'lower'}:
             continue
+        
+        # Skip table aliases
+        if identifier_lower in table_aliases:
+            continue
             
         # Check if it's a valid table or column
         is_valid_table = identifier_lower in valid_tables
@@ -446,7 +452,7 @@ def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str |
         if not (is_valid_table or is_valid_column):
             return False, identifier
     
-    # Additional check: look for FROM clauses and JOIN clauses to verify table names
+    # Additional check: verify table names in FROM and JOIN clauses
     from_tables = re.findall(r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql, re.IGNORECASE)
     join_tables = re.findall(r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql, re.IGNORECASE)
     
@@ -455,6 +461,42 @@ def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str |
             return False, f"table:{table}"
     
     return True, None
+
+
+def extract_table_aliases(sql: str, valid_tables: set) -> set:
+    """
+    Extract table aliases from SQL query.
+    Examples:
+    - FROM cooperatives c -> alias 'c'
+    - JOIN provinces p -> alias 'p'
+    """
+    aliases = set()
+    
+    # Pattern for table aliases in FROM clause: FROM table_name alias
+    from_pattern = r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+    from_matches = re.findall(from_pattern, sql, re.IGNORECASE)
+    
+    for table_name, alias in from_matches:
+        if table_name.lower() in valid_tables:
+            aliases.add(alias.lower())
+    
+    # Pattern for table aliases in JOIN clause: JOIN table_name alias
+    join_pattern = r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+    join_matches = re.findall(join_pattern, sql, re.IGNORECASE)
+    
+    for table_name, alias in join_matches:
+        if table_name.lower() in valid_tables:
+            aliases.add(alias.lower())
+    
+    # Pattern for table aliases with AS keyword: FROM table_name AS alias
+    as_pattern = r'\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+    as_matches = re.findall(as_pattern, sql, re.IGNORECASE)
+    
+    for table_name, alias in as_matches:
+        if table_name.lower() in valid_tables:
+            aliases.add(alias.lower())
+    
+    return aliases
 
 
 def ask_llm_for_sql_with_retry(question: str, max_retries: int = 2) -> Dict[str, Any]:
