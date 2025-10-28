@@ -18,8 +18,9 @@ load_dotenv()
 # Configuration
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 SAMPLE_ROWS = int(os.getenv("SAMPLE_ROWS", "2"))
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID", "vs_6900326ca24c81919d91d70dbbcaee09")
+SCHEMA_ASSISTANT_ID = os.getenv("SCHEMA_ASSISTANT_ID", "")
 
 # Initialize clients
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0)
@@ -55,21 +56,13 @@ def search_relevant_tables(question: str, max_tables: int = 5) -> List[str]:
             content=question
         )
         
-        # Create and run assistant with vector store
-        assistant = openai_client.beta.assistants.create(
-            instructions="You are a database schema expert. Based on the question, identify the most relevant database tables from the vector store. IMPORTANT: For geographical queries (provinces, districts, villages), ALWAYS include ALL related geographical tables: provinces, districts, subdistricts, villages. For village queries, include: village_potentials, villages, subdistricts, districts, provinces.",
-            model="gpt-4o-mini",
-            tools=[{"type": "file_search"}],
-            tool_resources={
-                "file_search": {
-                    "vector_store_ids": [VECTOR_STORE_ID]
-                }
-            }
-        )
+        # Use existing assistant from environment variable
+        if not SCHEMA_ASSISTANT_ID:
+            raise ValueError("SCHEMA_ASSISTANT_ID environment variable is required")
         
         run = openai_client.beta.threads.runs.create(
             thread_id=thread.id,
-            assistant_id=assistant.id
+            assistant_id=SCHEMA_ASSISTANT_ID
         )
         
         # Wait for completion (simplified - should implement proper polling)
