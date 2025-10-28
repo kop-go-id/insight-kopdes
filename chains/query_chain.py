@@ -18,9 +18,9 @@ load_dotenv()
 # Configuration
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 SAMPLE_ROWS = int(os.getenv("SAMPLE_ROWS", "2"))
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 # LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
-# LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
 VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID", "vs_6900326ca24c81919d91d70dbbcaee09")
 SCHEMA_ASSISTANT_ID = os.getenv("SCHEMA_ASSISTANT_ID", "")
 
