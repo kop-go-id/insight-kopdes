@@ -3,11 +3,12 @@ import re
 import json
 import datetime
 import decimal
-from typing import Dict, Any
+from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
 from sqlalchemy import text
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from db.connection import fetch_sample_rows, execute_read_query, engine
 from chains.summarizer import summarize_for_minister
@@ -18,8 +19,11 @@ load_dotenv()
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 SAMPLE_ROWS = int(os.getenv("SAMPLE_ROWS", "2"))
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID", "vs_6900326ca24c81919d91d70dbbcaee09")
 
+# Initialize clients
 llm = ChatOpenAI(model=LLM_MODEL, temperature=0)
+openai_client = OpenAI()
 
 
 # Utility: Safe JSON serialization
@@ -32,12 +36,112 @@ def safe_serialize(obj):
     return str(obj)
 
 
+# Vector Store Functions
+def search_relevant_tables(question: str, max_tables: int = 5) -> List[str]:
+    """
+    Search vector store untuk menemukan tabel yang relevan dengan pertanyaan.
+    Returns list of table names yang paling relevan.
+    """
+    try:
+        print(f"[DEBUG] Searching vector store for: {question}")
+        
+        # Create a thread and add the question as a message
+        thread = openai_client.beta.threads.create()
+        
+        # Add the question as a message to the thread
+        openai_client.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=question
+        )
+        
+        # Create and run assistant with vector store
+        assistant = openai_client.beta.assistants.create(
+            instructions="You are a database schema expert. Based on the question, identify the most relevant database tables from the vector store.",
+            model="gpt-4o-mini",
+            tools=[{"type": "file_search"}],
+            tool_resources={
+                "file_search": {
+                    "vector_store_ids": [VECTOR_STORE_ID]
+                }
+            }
+        )
+        
+        run = openai_client.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=assistant.id
+        )
+        
+        # Wait for completion (simplified - should implement proper polling)
+        import time
+        while run.status in ['queued', 'in_progress']:
+            time.sleep(1)
+            run = openai_client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id
+            )
+        
+        if run.status == 'completed':
+            # Get messages from the thread
+            messages = openai_client.beta.threads.messages.list(thread_id=thread.id)
+            
+            # Extract table names from the response
+            response_content = messages.data[0].content[0].text.value
+            relevant_tables = extract_table_names(response_content)
+            
+            print(f"[DEBUG] Vector store found tables: {relevant_tables}")
+            return relevant_tables[:max_tables]
+        else:
+            print(f"[DEBUG] Vector store search failed: {run.status}")
+            return get_fallback_tables(question)
+            
+    except Exception as e:
+        print(f"[DEBUG] Vector store error: {e}")
+        return get_fallback_tables(question)
+
+
+def extract_table_names(response_content: str) -> List[str]:
+    """Extract table names from assistant response"""
+    # Look for common table names in the response
+    common_tables = [
+        "cooperatives", "provinces", "districts", "villages", "users", 
+        "cooperative_types", "klus", "npaks", "institutions", "news"
+    ]
+    
+    found_tables = []
+    response_lower = response_content.lower()
+    
+    for table in common_tables:
+        if table in response_lower:
+            found_tables.append(table)
+    
+    return found_tables
+
+
+def get_fallback_tables(question: str) -> List[str]:
+    """Fallback table selection based on keywords when vector store fails"""
+    question_lower = question.lower()
+    
+    # Rule-based fallback
+    if any(word in question_lower for word in ["koperasi", "cooperative", "berapa koperasi", "jumlah koperasi"]):
+        return ["cooperatives", "provinces"]
+    elif any(word in question_lower for word in ["provinsi", "daerah", "wilayah"]):
+        return ["provinces", "districts", "cooperatives"]
+    elif any(word in question_lower for word in ["user", "pengguna", "anggota"]):
+        return ["users", "user_roles"]
+    elif any(word in question_lower for word in ["berita", "news"]):
+        return ["news"]
+    else:
+        # Default core tables
+        return ["cooperatives", "provinces", "users"]
+
+
 # Schema Loader (tables.json)
-def build_schema_summary():
+def build_schema_summary(relevant_tables: List[str] = None):
     """
     Load schema context strictly from tables.json.
-    This file defines all valid tables and columns.
-    If missing, fallback to live DB introspection.
+    If relevant_tables is provided, load only those tables.
+    Otherwise, load all tables (fallback behavior).
     """
     tables_path = os.path.join(os.path.dirname(__file__), "..", "tables.json")
 
@@ -49,17 +153,32 @@ def build_schema_summary():
             tables = schema_data.get("tables", {})
             summary = []
 
-            for table_name, meta in tables.items():
+            # Filter tables if relevant_tables is provided
+            tables_to_process = relevant_tables if relevant_tables else tables.keys()
+            
+            print(f"[DEBUG] Building schema for {len(tables_to_process)} tables: {list(tables_to_process)}")
+
+            for table_name in tables_to_process:
+                if table_name not in tables:
+                    print(f"[WARNING] Table {table_name} not found in tables.json")
+                    continue
+                    
+                meta = tables[table_name]
                 desc = meta.get("description", "")
                 cols = meta.get("columns", [])
                 col_desc = [
                     f"{c['name']} ({c['type']}): {c.get('description', '')}" for c in cols
                 ]
-                samples = fetch_sample_rows(table_name, SAMPLE_ROWS)
-
-                safe_samples = [
-                    {k: safe_serialize(v) for k, v in r.items()} for r in samples[:SAMPLE_ROWS]
-                ]
+                
+                # Only fetch samples for relevant tables to reduce DB load
+                try:
+                    samples = fetch_sample_rows(table_name, SAMPLE_ROWS)
+                    safe_samples = [
+                        {k: safe_serialize(v) for k, v in r.items()} for r in samples[:SAMPLE_ROWS]
+                    ]
+                except Exception as e:
+                    print(f"[WARNING] Failed to fetch samples for {table_name}: {e}")
+                    safe_samples = []
 
                 summary.append({
                     "table": table_name,
@@ -68,26 +187,30 @@ def build_schema_summary():
                     "sample_rows": safe_samples,
                 })
 
-            print(f"Loaded schema from tables.json ({len(summary)} tables)")
+            print(f"[DEBUG] Successfully loaded schema for {len(summary)} tables")
             return summary
         except Exception as e:
             print(f"Failed to load tables.json, fallback to DB schema: {e}")
 
     print("No tables.json found — using live DB schema instead")
-    return _build_schema_from_db()
+    return _build_schema_from_db(relevant_tables)
 
 
-def _build_schema_from_db():
+def _build_schema_from_db(relevant_tables: List[str] = None):
     """Fallback: auto-discover schema directly from PostgreSQL."""
     with engine.connect() as conn:
         result = conn.execute(
             text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
         )
-        tables = [r[0] for r in result.fetchall()]
+        all_tables = [r[0] for r in result.fetchall()]
+    
+    # Filter tables if relevant_tables is provided
+    tables_to_process = relevant_tables if relevant_tables else all_tables
+    tables_to_process = [t for t in tables_to_process if t in all_tables]  # Ensure table exists
 
     parts = []
     with engine.connect() as conn:
-        for t in tables:
+        for t in tables_to_process:
             try:
                 col_query = text("""
                     SELECT column_name, data_type
@@ -158,9 +281,9 @@ def get_example_queries() -> str:
         "5. SELECT name FROM users WHERE email LIKE '%@gmail.com'",
         "",
         "Contoh query yang SALAH:",
-        "❌ SELECT cooperative_name FROM koperasi (nama tabel/kolom tidak ada)",
-        "❌ SELECT * FROM coop (singkatan tidak boleh)",
-        "❌ SELECT name FROM cooperative (bentuk singular, harus 'cooperatives')",
+        "SALAH: SELECT cooperative_name FROM koperasi (nama tabel/kolom tidak ada)",
+        "SALAH: SELECT * FROM coop (singkatan tidak boleh)",
+        "SALAH: SELECT name FROM cooperative (bentuk singular, harus 'cooperatives')",
     ]
     return "\n".join(examples)
 
@@ -168,10 +291,14 @@ def get_example_queries() -> str:
 # SQL Generation (schema-aware)
 def ask_llm_for_sql(question: str) -> Dict[str, Any]:
     """
-    Ask LLM to generate a SQL query strictly based on tables.json.
+    Ask LLM to generate a SQL query using vector store to find relevant tables.
     Must return valid JSON: { "sql": "<query>" }.
     """
-    schema_summary = build_schema_summary()
+    # Step 1: Search vector store for relevant tables
+    relevant_tables = search_relevant_tables(question, max_tables=5)
+    
+    # Step 2: Build schema only for relevant tables
+    schema_summary = build_schema_summary(relevant_tables)
 
     # Build cleaner schema format for LLM
     schema_text = build_llm_friendly_schema(schema_summary)
@@ -189,7 +316,7 @@ def ask_llm_for_sql(question: str) -> Dict[str, Any]:
         content=(
             "Anda adalah asisten generator SQL PostgreSQL untuk dashboard data pemerintah. "
             "SANGAT PENTING: Anda HANYA boleh menggunakan tabel dan kolom yang PERSIS seperti "
-            "yang ada dalam schema di bawah ini. "
+            "yang ada dalam schema di bawah ini. Schema ini sudah difilter berdasarkan pertanyaan Anda. "
             "Jika pertanyaan tidak bisa dijawab dengan schema ini, kembalikan JSON "
             '{\"sql\": \"SELECT \'Data tidak tersedia\'::text as message\"}. '
             "JANGAN PERNAH mengarang, mengira-ngira, atau menebak nama kolom/tabel."
@@ -201,24 +328,27 @@ def ask_llm_for_sql(question: str) -> Dict[str, Any]:
 PERTANYAAN USER:
 {question}
 
-SCHEMA RESMI (dari tables.json):
+SCHEMA YANG RELEVAN (dipilih otomatis berdasarkan pertanyaan Anda):
 {schema_text}
 
-DAFTAR TABEL YANG VALID:
+TABEL YANG TERSEDIA UNTUK PERTANYAAN INI:
 {', '.join(valid_tables)}
 
-DAFTAR KOLOM YANG VALID (dengan nama tabel):
-{', '.join(valid_columns[:50])}... (dan lainnya sesuai schema di atas)
+KOLOM YANG BISA DIGUNAKAN:
+{', '.join(valid_columns)}
 
 {get_example_queries()}
 
 ATURAN WAJIB:
-1. HANYA gunakan nama tabel dan kolom yang ADA di schema di atas
-2. Nama tabel dan kolom CASE-SENSITIVE dan harus PERSIS sama
-3. Jika ragu, lebih baik kembalikan "Data tidak tersedia"
+1. HANYA gunakan tabel dan kolom yang ADA di schema di atas
+2. Schema ini sudah difilter khusus untuk pertanyaan Anda
+3. Untuk menghitung koperasi: SELECT COUNT(*) FROM cooperatives
 4. Format output: JSON saja {{ "sql": "SELECT ..." }}
 5. Jangan tambahkan komentar atau penjelasan di luar JSON
-6. Pelajari contoh query yang benar di atas!
+
+CONTOH UNTUK PERTANYAAN KOPERASI:
+- "ada berapa koperasi" → {{ "sql": "SELECT COUNT(*) FROM cooperatives" }}
+- "daftar koperasi" → {{ "sql": "SELECT name FROM cooperatives LIMIT 10" }}
 """
     )
 
@@ -437,13 +567,19 @@ PERBAIKI ERROR DI ATAS!
 # Main Query Pipeline
 def run_query_pipeline(question: str, user_id: int | None = None):
     """
-    1. Generate SQL via LLM (schema-constrained) with retry mechanism
-    2. Validate SQL safety and schema compliance
-    3. Execute query on PostgreSQL
-    4. Summarize using actual data
+    1. Search vector store for relevant tables
+    2. Generate SQL via LLM using only relevant schema
+    3. Validate SQL safety and schema compliance
+    4. Execute query on PostgreSQL
+    5. Summarize using actual data
     """
-    # Use the new retry mechanism
-    llm_resp = ask_llm_for_sql_with_retry(question, max_retries=2)
+    print(f"[DEBUG] Processing question: {question}")
+    
+    # Step 1: Get relevant tables from vector store
+    relevant_tables = search_relevant_tables(question, max_tables=5)
+    
+    # Step 2: Generate SQL using filtered schema
+    llm_resp = ask_llm_for_sql(question)
     raw_sql = llm_resp["sql"].strip()
 
     if raw_sql.endswith(";"):
@@ -457,8 +593,8 @@ def run_query_pipeline(question: str, user_id: int | None = None):
             "suggestion": "Coba perbaiki pertanyaan atau pastikan data yang dicari tersedia dalam sistem"
         }
 
-    # Final validation (should pass since retry handled this)
-    schema_summary = build_schema_summary()
+    # Step 3: Validation using the same relevant tables
+    schema_summary = build_schema_summary(relevant_tables)
     if not validate_sql(raw_sql):
         return {"error": "Generated SQL failed final validation.", "generated_sql": raw_sql}
 

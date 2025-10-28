@@ -7,6 +7,9 @@ langchain-core==0.3.21
 langchain-community==0.3.7
 langchain-openai==0.2.5
 
+# OpenAI for vector store
+openai>=1.0.0
+
 # Database + env
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
