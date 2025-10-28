@@ -254,7 +254,13 @@ def build_llm_friendly_schema(schema_summary: list) -> str:
         for col in columns:
             # Extract column name (before first space/parenthesis)
             col_name = col.split(" ")[0].split("(")[0]
-            table_section += f"\n  - {col_name}"
+            
+            # Check if column name is camelCase (has uppercase letters)
+            if any(c.isupper() for c in col_name):
+                # Show both quoted and unquoted formats
+                table_section += f"\n  - {col_name} (gunakan: \"{col_name}\")"
+            else:
+                table_section += f"\n  - {col_name}"
         
         # Add sample data if available
         samples = table_info.get("sample_rows", [])
@@ -442,13 +448,35 @@ def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str |
     # Extract table aliases from SQL
     table_aliases = extract_table_aliases(sql, valid_tables)
     
-    # Remove quoted strings first
-    sql_cleaned = re.sub(r"'[^']*'", '', sql)
-    sql_cleaned = re.sub(r'"[^"]*"', '', sql_cleaned)
+    # Find quoted identifiers (preserve case)
+    quoted_identifiers = re.findall(r'"([^"]*)"', sql)
     
-    # Find potential table and column references
-    potential_identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', sql_cleaned)
+    # Remove quoted strings (literals) but preserve quoted identifiers
+    sql_for_checking = sql
+    sql_for_checking = re.sub(r"'[^']*'", '', sql_for_checking)  # Remove string literals
     
+    # Find potential unquoted identifiers
+    # First remove quoted identifiers to avoid double-checking
+    sql_without_quoted = re.sub(r'"[^"]*"', '', sql_for_checking)
+    potential_identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', sql_without_quoted)
+    
+    # Check quoted identifiers (case-sensitive)
+    for identifier in quoted_identifiers:
+        # For quoted identifiers, check exact case match
+        is_valid_column = False
+        for table_info in schema_summary:
+            for col in table_info["columns"]:
+                col_name = col.split(" ")[0].split("(")[0]  # Extract clean column name
+                if col_name == identifier:  # Exact case match
+                    is_valid_column = True
+                    break
+            if is_valid_column:
+                break
+        
+        if not is_valid_column:
+            return False, f'quoted_column:"{identifier}"'
+    
+    # Check unquoted identifiers (case-insensitive)
     for identifier in potential_identifiers:
         identifier_lower = identifier.lower()
         
