@@ -30,7 +30,7 @@ python populate_vector_store.py upload
 
 ### Before (Original Flow):
 ```
-Question → Load ALL tables.json → Send 100+ tables to LLM → Generate SQL
+Question → Load ALL kdmp-tables.json → Send 100+ tables to LLM → Generate SQL
 ```
 **Problems:**
 - Prompt too long (50k+ tokens)
@@ -152,7 +152,7 @@ If vector store fails:
 ## Maintenance
 
 ### Update Vector Store:
-When tables.json changes, re-run:
+When kdmp-tables.json changes, re-run:
 ```bash
 python populate_vector_store.py upload
 ```

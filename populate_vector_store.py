@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script untuk populate vector store dengan data dari tables.json
+Script untuk populate vector store dengan data dari kdmp-tables.json
 Jalankan script ini sekali untuk upload semua table descriptions ke vector store
 """
 import os
@@ -13,12 +13,12 @@ load_dotenv()
 
 def create_table_documents():
     """
-    Buat dokumen untuk setiap tabel dari tables.json
+    Buat dokumen untuk setiap tabel dari kdmp-tables.json
     """
-    # Load tables.json
-    tables_path = "tables.json"
+    # Load kdmp-tables.json
+    tables_path = "kdmp-tables.json"
     if not os.path.exists(tables_path):
-        print("Error: tables.json tidak ditemukan")
+        print("Error: kdmp-tables.json tidak ditemukan")
         return []
     
     with open(tables_path, "r", encoding="utf-8") as f:

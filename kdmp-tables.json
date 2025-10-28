@@ -1711,7 +1711,7 @@
       ]
     },
     "districts": {
-      "description": "Data master kabupaten/kota Indonesia, pembagian administrasi tingkat kedua di bawah provinsi",
+      "description": "Data master kabupaten/kota Indonesia, pembagian administrasi tingkat kedua di bawah provinsi. PENTING: Nama district dalam format UPPERCASE (contoh: 'PALEMBANG', 'BANDUNG', 'JAKARTA PUSAT'). Untuk JOIN: FROM districts d JOIN provinces p ON d.province_code = p.code, dan TO subdistricts: subdistricts.district_code = districts.code",
       "columns": [
         {
           "name": "district_id",
@@ -1721,7 +1721,7 @@
         {
           "name": "province_code",
           "type": "VARCHAR(50)",
-          "description": "Kode provinsi tempat kabupaten/kota ini berada"
+          "description": "Kode provinsi tempat kabupaten/kota ini berada. JOIN: districts.province_code = provinces.code"
         },
         {
           "name": "name",
@@ -1906,7 +1906,7 @@
       ]
     },
     "provinces": {
-      "description": "Data master provinsi Indonesia untuk hierarki pembagian administrasi",
+      "description": "Data master provinsi Indonesia untuk hierarki pembagian administrasi. PENTING: Nama provinsi dalam format UPPERCASE (contoh: 'SUMATERA SELATAN', 'JAWA BARAT', 'DKI JAKARTA'). Untuk JOIN ke districts gunakan: districts.province_code = provinces.code",
       "columns": [
         {
           "name": "province_id",
@@ -2026,22 +2026,22 @@
         {
           "name": "provinceId",
           "type": "BIGINT",
-          "description": "Kunci asing ke tabel provinces - lokasi provinsi koperasi"
+          "description": "Kunci asing ke tabel provinces - lokasi provinsi koperasi. JOIN: cooperatives.provinceId = provinces.province_id. CATATAN: Cooperatives punya direct foreign key ke semua level geografis (provinceId, districtId, subdistrictId, villageId)"
         },
         {
           "name": "districtId",
           "type": "BIGINT",
-          "description": "Kunci asing ke tabel districts - lokasi kabupaten koperasi"
+          "description": "Kunci asing ke tabel districts - lokasi kabupaten koperasi. JOIN: cooperatives.districtId = districts.district_id"
         },
         {
           "name": "subdistrictId",
           "type": "BIGINT",
-          "description": "Kunci asing ke tabel subdistricts - lokasi kecamatan koperasi"
+          "description": "Kunci asing ke tabel subdistricts - lokasi kecamatan koperasi. JOIN: cooperatives.subdistrictId = subdistricts.subdistrict_id"
         },
         {
           "name": "villageId",
           "type": "BIGINT",
-          "description": "Kunci asing ke tabel villages - lokasi desa koperasi"
+          "description": "Kunci asing ke tabel villages - lokasi desa koperasi. JOIN: cooperatives.villageId = villages.village_id"
         },
         {
           "name": "address",
@@ -2356,7 +2356,7 @@
       ]
     },
     "subdistricts": {
-      "description": "Data master kecamatan Indonesia, pembagian administrasi tingkat ketiga di bawah kabupaten/kota",
+      "description": "Data master kecamatan Indonesia, pembagian administrasi tingkat ketiga di bawah kabupaten/kota. PENTING: Nama subdistrict dalam format Title Case (contoh: 'Ilir Timur I', 'Coblong', 'Gambir'). Untuk JOIN: FROM subdistricts sd JOIN districts d ON sd.district_code = d.code, dan TO villages: villages.subdistrict_code = subdistricts.code",
       "columns": [
         {
           "name": "subdistrict_id",
@@ -2366,7 +2366,7 @@
         {
           "name": "district_code",
           "type": "VARCHAR(50)",
-          "description": "Kode kabupaten/kota tempat kecamatan ini berada"
+          "description": "Kode kabupaten/kota tempat kecamatan ini berada. JOIN: subdistricts.district_code = districts.code"
         },
         {
           "name": "name",
@@ -2471,7 +2471,7 @@
       ]
     },
     "villages": {
-      "description": "Data master desa Indonesia, pembagian administrasi terendah dengan informasi demografi dan keuangan",
+      "description": "Data master desa Indonesia, pembagian administrasi terendah dengan informasi demografi dan keuangan. PENTING: Nama village dalam format Title Case (contoh: 'Bukit Lama', 'Dago', 'Kebon Kelapa'). Untuk JOIN ke level geografis lebih tinggi: FROM villages v JOIN subdistricts sd ON v.subdistrict_code = sd.code JOIN districts d ON sd.district_code = d.code JOIN provinces p ON d.province_code = p.code",
       "columns": [
         {
           "name": "village_id",
@@ -2481,7 +2481,7 @@
         {
           "name": "subdistrict_code",
           "type": "VARCHAR(50)",
-          "description": "Kode kecamatan tempat desa ini berada"
+          "description": "Kode kecamatan tempat desa ini berada. JOIN: villages.subdistrict_code = subdistricts.code"
         },
         {
           "name": "code",
@@ -4426,7 +4426,7 @@
       ]
     },
     "village_potentials": {
-      "description": "Potensi desa yang dapat dikembangkan untuk meningkatkan ekonomi masyarakat",
+      "description": "Potensi desa yang dapat dikembangkan untuk meningkatkan ekonomi masyarakat. CONTOH QUERY GEOGRAFIS: SELECT vp.name FROM village_potentials vp JOIN villages v ON vp.village_id = v.village_id JOIN subdistricts sd ON v.subdistrict_code = sd.code JOIN districts d ON sd.district_code = d.code JOIN provinces p ON d.province_code = p.code WHERE p.name = 'SUMATERA SELATAN'",
       "columns": [
         {
           "name": "village_potentials_id",
@@ -4436,7 +4436,7 @@
         {
           "name": "village_id",
           "type": "BIGINT",
-          "description": "Foreign key ke tabel villages - desa yang memiliki potensi"
+          "description": "Foreign key ke tabel villages - desa yang memiliki potensi. JOIN: village_potentials.village_id = villages.village_id"
         },
         {
           "name": "village_code",

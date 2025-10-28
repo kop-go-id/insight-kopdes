@@ -57,7 +57,7 @@ def search_relevant_tables(question: str, max_tables: int = 5) -> List[str]:
         
         # Create and run assistant with vector store
         assistant = openai_client.beta.assistants.create(
-            instructions="You are a database schema expert. Based on the question, identify the most relevant database tables from the vector store.",
+            instructions="You are a database schema expert. Based on the question, identify the most relevant database tables from the vector store. IMPORTANT: For geographical queries (provinces, districts, villages), ALWAYS include ALL related geographical tables: provinces, districts, subdistricts, villages. For village queries, include: village_potentials, villages, subdistricts, districts, provinces.",
             model="gpt-4o-mini",
             tools=[{"type": "file_search"}],
             tool_resources={
@@ -104,8 +104,8 @@ def extract_table_names(response_content: str) -> List[str]:
     """Extract table names from assistant response"""
     # Look for common table names in the response
     common_tables = [
-        "cooperatives", "provinces", "districts", "villages", "users", 
-        "cooperative_types", "klus", "npaks", "institutions", "news"
+        "cooperatives", "provinces", "districts", "subdistricts", "villages", "users", 
+        "cooperative_types", "klus", "npaks", "institutions", "news", "village_potentials"
     ]
     
     found_tables = []
@@ -114,6 +114,13 @@ def extract_table_names(response_content: str) -> List[str]:
     for table in common_tables:
         if table in response_lower:
             found_tables.append(table)
+    
+    # Auto-include geographical chain for village queries
+    if any(geo_table in found_tables for geo_table in ["villages", "village_potentials"]):
+        geographical_tables = ["provinces", "districts", "subdistricts", "villages", "village_potentials"]
+        for geo_table in geographical_tables:
+            if geo_table not in found_tables:
+                found_tables.append(geo_table)
     
     return found_tables
 
@@ -136,14 +143,14 @@ def get_fallback_tables(question: str) -> List[str]:
         return ["cooperatives", "provinces", "users"]
 
 
-# Schema Loader (tables.json)
+# Schema Loader (kdmp-tables.json)
 def build_schema_summary(relevant_tables: List[str] = None):
     """
-    Load schema context strictly from tables.json.
+    Load schema context strictly from kdmp-tables.json.
     If relevant_tables is provided, load only those tables.
     Otherwise, load all tables (fallback behavior).
     """
-    tables_path = os.path.join(os.path.dirname(__file__), "..", "tables.json")
+    tables_path = os.path.join(os.path.dirname(__file__), "..", "kdmp-tables.json")
 
     if os.path.exists(tables_path):
         try:
@@ -160,7 +167,7 @@ def build_schema_summary(relevant_tables: List[str] = None):
 
             for table_name in tables_to_process:
                 if table_name not in tables:
-                    print(f"[WARNING] Table {table_name} not found in tables.json")
+                    print(f"[WARNING] Table {table_name} not found in kdmp-tables.json")
                     continue
                     
                 meta = tables[table_name]
@@ -190,9 +197,9 @@ def build_schema_summary(relevant_tables: List[str] = None):
             print(f"[DEBUG] Successfully loaded schema for {len(summary)} tables")
             return summary
         except Exception as e:
-            print(f"Failed to load tables.json, fallback to DB schema: {e}")
+            print(f"Failed to load kdmp-tables.json, fallback to DB schema: {e}")
 
-    print("No tables.json found — using live DB schema instead")
+    print("No kdmp-tables.json found — using live DB schema instead")
     return _build_schema_from_db(relevant_tables)
 
 
@@ -416,7 +423,7 @@ def validate_sql(sql: str) -> bool:
 
 def enforce_schema_strictly(sql: str, schema_summary: list) -> tuple[bool, str | None]:
     """
-    Ensure that all table and column names used in the SQL exist in tables.json.
+    Ensure that all table and column names used in the SQL exist in kdmp-tables.json.
     Now supports table aliases and more sophisticated SQL parsing.
     Returns (is_valid, offending_identifier)
     """
@@ -573,7 +580,7 @@ def ask_llm_for_sql_with_retry(question: str, max_retries: int = 2) -> Dict[str,
                 
             ok, invalid_name = enforce_schema_strictly(sql, schema_summary)
             if not ok:
-                last_error = f"Nama tabel/kolom '{invalid_name}' tidak ditemukan dalam schema. Gunakan hanya nama yang ada di tables.json"
+                last_error = f"Nama tabel/kolom '{invalid_name}' tidak ditemukan dalam schema. Gunakan hanya nama yang ada di kdmp-tables.json"
                 continue
                 
             # If we get here, SQL is valid
