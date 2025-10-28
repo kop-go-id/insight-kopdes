@@ -276,10 +276,15 @@ def get_example_queries() -> str:
         "Contoh query yang BENAR:",
         "1. SELECT name FROM cooperatives LIMIT 10",
         "2. SELECT COUNT(*) FROM cooperatives WHERE created_at > '2023-01-01'",
-        "3. SELECT province_id, COUNT(*) as total FROM cooperatives GROUP BY province_id",
-        "4. SELECT c.name, p.name as province FROM cooperatives c JOIN provinces p ON c.provinceId = p.province_id",
+        "3. SELECT \"provinceId\", COUNT(*) as total FROM cooperatives GROUP BY \"provinceId\"",
+        "4. SELECT c.name, p.name as province FROM cooperatives c JOIN provinces p ON c.\"provinceId\" = p.province_id",
         "5. SELECT name FROM users WHERE email LIKE '%@gmail.com'",
-        "6. SELECT COUNT(*) FROM cooperatives c1 WHERE c1.villageId IN (SELECT c2.villageId FROM cooperatives c2 GROUP BY c2.villageId HAVING COUNT(*) > 1)",
+        "6. SELECT COUNT(*) FROM cooperatives c1 WHERE c1.\"villageId\" IN (SELECT c2.\"villageId\" FROM cooperatives c2 GROUP BY c2.\"villageId\" HAVING COUNT(*) > 1)",
+        "",
+        "PENTING - Aturan untuk KOLOM CAMELCASE:",
+        "- Kolom dengan camelCase (seperti villageId, provinceId) WAJIB pakai double quotes",
+        "- BENAR: c.\"villageId\", c.\"provinceId\", c.\"districtId\"",
+        "- SALAH: c.villageId, c.provinceId, c.districtId",
         "",
         "PENTING - Aturan untuk SUBQUERY dan ALIAS:",
         "- Jika menggunakan alias pada tabel utama, WAJIB gunakan alias di subquery juga",
@@ -291,6 +296,7 @@ def get_example_queries() -> str:
         "SALAH: SELECT * FROM coop (singkatan tidak boleh)",
         "SALAH: SELECT name FROM cooperative (bentuk singular, harus 'cooperatives')",
         "SALAH: SELECT c1.name FROM cooperatives c1 WHERE c1.id IN (SELECT id FROM cooperatives) (subquery harus pakai alias)",
+        "SALAH: SELECT c.villageId FROM cooperatives c (camelCase harus pakai quotes: c.\"villageId\")",
     ]
     return "\n".join(examples)
 
@@ -354,12 +360,14 @@ ATURAN WAJIB:
 5. Jangan tambahkan komentar atau penjelasan di luar JSON
 6. WAJIB: Jika pakai alias di main query, SEMUA reference ke tabel HARUS pakai alias yang sama
 7. WAJIB: Di subquery, SELALU gunakan alias baru yang berbeda (c1, c2, c3, dst)
-8. BENAR: FROM cooperatives c1 WHERE c1.id IN (SELECT c2.id FROM cooperatives c2)
-9. SALAH: FROM cooperatives c1 WHERE c1.id IN (SELECT id FROM cooperatives)
+8. WAJIB: Kolom camelCase (villageId, provinceId, districtId) HARUS pakai double quotes
+9. BENAR: FROM cooperatives c1 WHERE c1.\"villageId\" IN (SELECT c2.\"villageId\" FROM cooperatives c2)
+10. SALAH: FROM cooperatives c1 WHERE c1.villageId IN (SELECT villageId FROM cooperatives)
 
 CONTOH UNTUK PERTANYAAN KOPERASI:
 - "ada berapa koperasi" → {{ "sql": "SELECT COUNT(*) FROM cooperatives" }}
 - "daftar koperasi" → {{ "sql": "SELECT name FROM cooperatives LIMIT 10" }}
+- "koperasi per desa" → {{ "sql": "SELECT \\\"villageId\\\", COUNT(*) FROM cooperatives GROUP BY \\\"villageId\\\"" }}
 """
     )
 
